@@ -103,25 +103,26 @@ if uploaded_file is not None:
                     max_length = max((len(str(cell.value)) for cell in col), default=0)
                     ws.column_dimensions[col[0].column_letter].width = max_length + 4
 
-            # --- Refined Logical Masks ---
+            # --- PRECISE CATEGORIZATION (Fixing Double-Counting) ---
+            # 1. Action Required: Kids tickets missing year info
             is_kids_ticket = (df['Ticket'] == 'Pre-school to Year 9')
-            is_adult_ticket = (df['Ticket'] == 'Senior / Adult Race')
-            # Check for missing years specifically for kids
             missing_year = (df['School year'].astype(str).str.strip() == '') | (df['School year'].astype(str).str.lower() == 'nan')
-
-            # Only Kids tickets with missing years go to Action Required
             discrepancy_df = df[is_kids_ticket & missing_year].copy()
             
-            # Adult Race includes all Adult Tickets + Older Kids (Years 10-13)
-            adult_mask = is_adult_ticket | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            # 2. Senior / Adult Race: Adult Tickets OR Older Kids
+            adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            adult_df = df[adult_mask].copy().sort_values(by='Surname')
             
-            # Kids race includes kids tickets that HAVE a valid year group
-            kids_mask = is_kids_ticket & ~missing_year
-            
-            # Donations/Other are anything that isn't a race ticket
-            donation_mask = ~(is_kids_ticket | is_adult_ticket)
+            # 3. Valid Kids Race Tabs (Excluding Adult and Missing Year kids)
+            kids_mask = is_kids_ticket & ~missing_year & ~df.index.isin(adult_df.index)
+            kids_df = df[kids_mask].copy()
 
-            # 1. Action Required Tab
+            # 4. Donations Catch-all: Anything not assigned to a sheet above
+            assigned_indexes = list(discrepancy_df.index) + list(adult_df.index) + list(kids_df.index)
+            donation_df = df[~df.index.isin(assigned_indexes)].copy()
+
+            # --- SHEET GENERATION ---
+            # Action Required
             if not discrepancy_df.empty:
                 discrepancy_df.to_excel(writer, sheet_name='Action Required', index=False, startrow=1)
                 ws_disc = writer.sheets['Action Required']
@@ -129,36 +130,34 @@ if uploaded_file is not None:
                 apply_style(ws_disc, len(discrepancy_df.columns), is_alert=True)
                 audit_records.append({'Sort': -2, 'Category': '🚨 Action Required (Kids Missing Year)', 'Count': len(discrepancy_df)})
 
-            # 2. Adult Race
-            adult_df = df[adult_mask].copy().sort_values(by='Surname')
-            adult_cols = ['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned Team Name', 'School name (and house)', 'School year']
-            actual_adult_cols = [c for c in adult_cols if c in adult_df.columns]
-            adult_df[actual_adult_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
-            ws_adult = writer.sheets['Senior Adult Race']
-            ws_adult['A1'], ws_adult['A1'].font = "Senior / Adult Race", title_font
-            apply_style(ws_adult, len(actual_adult_cols))
-            audit_records.append({'Sort': -1, 'Category': 'Senior / Adult Race', 'Count': len(adult_df)})
+            # Senior Adult Race
+            if not adult_df.empty:
+                adult_cols = ['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned Team Name', 'School name (and house)', 'School year']
+                actual_adult_cols = [c for c in adult_cols if c in adult_df.columns]
+                adult_df[actual_adult_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
+                ws_adult = writer.sheets['Senior Adult Race']
+                ws_adult['A1'], ws_adult['A1'].font = "Senior / Adult Race", title_font
+                apply_style(ws_adult, len(actual_adult_cols))
+                audit_records.append({'Sort': -1, 'Category': 'Senior / Adult Race', 'Count': len(adult_df)})
 
-            # 3. Kids Tabs
-            kids_df = df[kids_mask].copy()
+            # Kids Tabs
             years = sorted([y for y in kids_df['School year'].unique() if y != ''], key=lambda x: YEAR_ORDER.get(x, 99))
             for year in years:
                 y_df = kids_df[kids_df['School year'] == year].sort_values(by='Surname')
-                y_df[['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned School Name']].to_excel(writer, sheet_name=str(year)[:31], index=False, startrow=1)
+                y_cols = ['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned School Name']
+                y_df[y_cols].to_excel(writer, sheet_name=str(year)[:31], index=False, startrow=1)
                 ws = writer.sheets[str(year)[:31]]
                 ws['A1'], ws['A1'].font = f"Race Entries: {year}", title_font
                 apply_style(ws, 6)
                 audit_records.append({'Sort': YEAR_ORDER.get(year, 99), 'Category': f'Kids: {year}', 'Count': len(y_df)})
 
-            # 4. Donation Audit
-            donation_df = df[donation_mask]
+            # Audit Summary
             audit_records.append({'Sort': 100, 'Category': 'Donations / Other (Excluded)', 'Count': len(donation_df)})
-
-            # 5. Audit Summary
             audit_df = pd.DataFrame(audit_records).sort_values(by='Sort')
             total_output = audit_df['Count'].sum()
             final_audit_display = audit_df[['Category', 'Count']].copy()
             final_audit_display.loc[len(final_audit_display)] = {'Category': 'GRAND TOTAL', 'Count': total_output}
+            
             final_audit_display.to_excel(writer, sheet_name='Audit Summary', index=False, startrow=3)
             ws_audit = writer.sheets['Audit Summary']
             ws_audit['A1'], ws_audit['A1'].font = "Data Reconciliation Report", title_font
