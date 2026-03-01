@@ -103,24 +103,31 @@ if uploaded_file is not None:
                     max_length = max((len(str(cell.value)) for cell in col), default=0)
                     ws.column_dimensions[col[0].column_letter].width = max_length + 4
 
-            # --- Discrepancy Logic ---
-            # Identifies entries that ARE tickets but are missing a School Year 
-            is_ticket = (df['Ticket'] == 'Senior / Adult Race') | (df['Ticket'] == 'Pre-school to Year 9')
-            missing_year = (df['School year'].str.strip() == '') | (df['School year'].str.lower() == 'nan')
-            discrepancy_df = df[is_ticket & missing_year].copy()
+            # --- Refined Logical Masks ---
+            is_kids_ticket = (df['Ticket'] == 'Pre-school to Year 9')
+            is_adult_ticket = (df['Ticket'] == 'Senior / Adult Race')
+            # Check for missing years specifically for kids
+            missing_year = (df['School year'].astype(str).str.strip() == '') | (df['School year'].astype(str).str.lower() == 'nan')
+
+            # Only Kids tickets with missing years go to Action Required
+            discrepancy_df = df[is_kids_ticket & missing_year].copy()
             
-            # Valid Categories
-            adult_mask = (df['Ticket'] == 'Senior / Adult Race') & ~missing_year | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
-            kids_mask = (df['Ticket'] == 'Pre-school to Year 9') & ~missing_year
-            donation_mask = ~(adult_mask | kids_mask | (is_ticket & missing_year))
+            # Adult Race includes all Adult Tickets + Older Kids (Years 10-13)
+            adult_mask = is_adult_ticket | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            
+            # Kids race includes kids tickets that HAVE a valid year group
+            kids_mask = is_kids_ticket & ~missing_year
+            
+            # Donations/Other are anything that isn't a race ticket
+            donation_mask = ~(is_kids_ticket | is_adult_ticket)
 
             # 1. Action Required Tab
             if not discrepancy_df.empty:
                 discrepancy_df.to_excel(writer, sheet_name='Action Required', index=False, startrow=1)
                 ws_disc = writer.sheets['Action Required']
-                ws_disc['A1'], ws_disc['A1'].font = "⚠️ DATA DISCREPANCIES - Missing Year Group", title_font
+                ws_disc['A1'], ws_disc['A1'].font = "⚠️ DATA DISCREPANCIES - Kids Missing Year Group", title_font
                 apply_style(ws_disc, len(discrepancy_df.columns), is_alert=True)
-                audit_records.append({'Sort': -2, 'Category': '🚨 Action Required (Missing Year)', 'Count': len(discrepancy_df)})
+                audit_records.append({'Sort': -2, 'Category': '🚨 Action Required (Kids Missing Year)', 'Count': len(discrepancy_df)})
 
             # 2. Adult Race
             adult_df = df[adult_mask].copy().sort_values(by='Surname')
