@@ -13,7 +13,6 @@ conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_gsheet_memory(worksheet_name):
     try:
-        # Pulls the latest corrections from the cloud [cite: 5, 2025-12-24]
         return conn.read(worksheet=worksheet_name).fillna('')
     except:
         return pd.DataFrame(columns=["Raw Name", "Cleaned Name"])
@@ -30,7 +29,7 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file).fillna('')
     total_input_rows = len(df)
     
-    # Pre-processing: Standardize casing and split names
+    # Pre-processing
     name_split = df['Full name'].str.split(' ', n=1, expand=True)
     df.insert(2, 'Forename', name_split[0].str.strip().str.title())
     df.insert(3, 'Surname', name_split[1].fillna('').str.strip().str.title())
@@ -41,7 +40,6 @@ if uploaded_file is not None:
     if 'Team name' in df.columns:
         df['Team name'] = df['Team name'].astype(str).str.strip().str.title()
 
-    # Load persistent memory from Google Sheets
     school_mem_df = load_gsheet_memory("Schools")
     team_mem_df = load_gsheet_memory("Teams")
     
@@ -70,31 +68,26 @@ if uploaded_file is not None:
     st.header("3. Generate Tring Race Pack")
     if st.button("Process & Save Corrections"):
         
-        # UPDATE CLOUD MEMORY
         conn.update(worksheet="Schools", data=edited_schools)
         conn.update(worksheet="Teams", data=edited_teams)
         
         school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
         df['Cleaned School Name'] = df['School name'].replace(school_dict)
-        
         team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
         df['Cleaned Team Name'] = df['Team name'].replace(team_dict) if 'Team name' in df.columns else ''
         
-        df['Cleaned Team Name'] = df['Cleaned Team Name'].replace(['Nan', 'nan'], '')
-        df['Cleaned School Name'] = df['Cleaned School Name'].replace(['Nan', 'nan'], '')
-
         output = io.BytesIO()
         audit_records = []
         
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Styles for polished output
             thin_border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
             header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
             alt_fill = PatternFill(start_color="EAF1FB", end_color="EAF1FB", fill_type="solid")
+            alert_fill = PatternFill(start_color="FFCCCC", end_color="FFCCCC", fill_type="solid")
             title_font = Font(bold=True, size=16)
             header_font = Font(bold=True, color="FFFFFF")
 
-            def apply_style(ws, col_count):
+            def apply_style(ws, col_count, is_alert=False):
                 for cell in ws[2]:
                     cell.fill = header_fill
                     cell.font = header_font
@@ -102,17 +95,34 @@ if uploaded_file is not None:
                 for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
                     for cell in row:
                         cell.border = thin_border
-                        if i % 2 == 0: cell.fill = alt_fill
+                        if is_alert:
+                            cell.fill = alert_fill
+                        elif i % 2 == 0: 
+                            cell.fill = alt_fill
                 for col in ws.columns:
                     max_length = max((len(str(cell.value)) for cell in col), default=0)
                     ws.column_dimensions[col[0].column_letter].width = max_length + 4
 
-            # Categorization
-            adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
-            kids_mask = (df['Ticket'] == 'Pre-school to Year 9')
-            donation_mask = ~(adult_mask | kids_mask)
+            # --- Discrepancy Logic ---
+            # Identifies entries that ARE tickets but are missing a School Year 
+            is_ticket = (df['Ticket'] == 'Senior / Adult Race') | (df['Ticket'] == 'Pre-school to Year 9')
+            missing_year = (df['School year'].str.strip() == '') | (df['School year'].str.lower() == 'nan')
+            discrepancy_df = df[is_ticket & missing_year].copy()
+            
+            # Valid Categories
+            adult_mask = (df['Ticket'] == 'Senior / Adult Race') & ~missing_year | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            kids_mask = (df['Ticket'] == 'Pre-school to Year 9') & ~missing_year
+            donation_mask = ~(adult_mask | kids_mask | (is_ticket & missing_year))
 
-            # 1. Adult Race
+            # 1. Action Required Tab
+            if not discrepancy_df.empty:
+                discrepancy_df.to_excel(writer, sheet_name='Action Required', index=False, startrow=1)
+                ws_disc = writer.sheets['Action Required']
+                ws_disc['A1'], ws_disc['A1'].font = "⚠️ DATA DISCREPANCIES - Missing Year Group", title_font
+                apply_style(ws_disc, len(discrepancy_df.columns), is_alert=True)
+                audit_records.append({'Sort': -2, 'Category': '🚨 Action Required (Missing Year)', 'Count': len(discrepancy_df)})
+
+            # 2. Adult Race
             adult_df = df[adult_mask].copy().sort_values(by='Surname')
             adult_cols = ['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned Team Name', 'School name (and house)', 'School year']
             actual_adult_cols = [c for c in adult_cols if c in adult_df.columns]
@@ -122,30 +132,26 @@ if uploaded_file is not None:
             apply_style(ws_adult, len(actual_adult_cols))
             audit_records.append({'Sort': -1, 'Category': 'Senior / Adult Race', 'Count': len(adult_df)})
 
-            # 2. Kids Tabs
+            # 3. Kids Tabs
             kids_df = df[kids_mask].copy()
-            kids_cols = ['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned School Name']
-            actual_kids_cols = [c for c in kids_cols if c in kids_df.columns]
-            
             years = sorted([y for y in kids_df['School year'].unique() if y != ''], key=lambda x: YEAR_ORDER.get(x, 99))
             for year in years:
                 y_df = kids_df[kids_df['School year'] == year].sort_values(by='Surname')
-                y_df[actual_kids_cols].to_excel(writer, sheet_name=str(year)[:31], index=False, startrow=1)
+                y_df[['Race Number', 'Surname', 'Forename', 'Full name', 'Gender', 'Cleaned School Name']].to_excel(writer, sheet_name=str(year)[:31], index=False, startrow=1)
                 ws = writer.sheets[str(year)[:31]]
                 ws['A1'], ws['A1'].font = f"Race Entries: {year}", title_font
-                apply_style(ws, len(actual_kids_cols))
+                apply_style(ws, 6)
                 audit_records.append({'Sort': YEAR_ORDER.get(year, 99), 'Category': f'Kids: {year}', 'Count': len(y_df)})
 
-            # 3. Donation Audit
+            # 4. Donation Audit
             donation_df = df[donation_mask]
             audit_records.append({'Sort': 100, 'Category': 'Donations / Other (Excluded)', 'Count': len(donation_df)})
 
-            # 4. Audit Summary Tab
+            # 5. Audit Summary
             audit_df = pd.DataFrame(audit_records).sort_values(by='Sort')
             total_output = audit_df['Count'].sum()
             final_audit_display = audit_df[['Category', 'Count']].copy()
             final_audit_display.loc[len(final_audit_display)] = {'Category': 'GRAND TOTAL', 'Count': total_output}
-            
             final_audit_display.to_excel(writer, sheet_name='Audit Summary', index=False, startrow=3)
             ws_audit = writer.sheets['Audit Summary']
             ws_audit['A1'], ws_audit['A1'].font = "Data Reconciliation Report", title_font
@@ -153,13 +159,11 @@ if uploaded_file is not None:
             ws_audit['A2'].font = Font(color="008000" if total_input_rows == total_output else "FF0000", bold=True)
             apply_style(ws_audit, 2)
 
-        # UI Reconciliation Report
         st.divider()
         st.subheader("Audit Results")
         if total_input_rows == total_output:
-            st.success(f"Reconciliation Perfect! All {total_input_rows} rows accounted for.")
+            st.success(f"Perfect Match! {total_input_rows} rows accounted for.")
         else:
             st.error(f"Variance! Input: {total_input_rows} | Accounted: {total_output}")
         st.table(final_audit_display)
-
         st.download_button(label="📥 Download Tring Race Pack", data=output.getvalue(), file_name="Tring_Race_Entries.xlsx")
