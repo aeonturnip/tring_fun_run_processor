@@ -5,7 +5,7 @@ from streamlit_gsheets import GSheetsConnection
 from openpyxl.styles import Font, Border, Side, PatternFill
 import datetime
 
-# 1. Page Configuration
+# 1. Page Configuration & Branding
 st.set_page_config(page_title="Tring Fun Run Tools", layout="wide")
 st.title("🏃‍♂️ Tring Fun Run: Registration & Results Dashboard")
 
@@ -13,16 +13,13 @@ st.title("🏃‍♂️ Tring Fun Run: Registration & Results Dashboard")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_gsheet(worksheet_name, ttl_val=None):
-    """
-    Loads data from Google Sheets. 
-    Use ttl_val=0 when you need the most recent data (e.g., right before an update).
-    """
+    """Loads data from Google Sheets. Use ttl_val=0 for live data."""
     try:
         return conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
     except:
         return pd.DataFrame()
 
-# 3. Interface Tabs
+# 3. Define Main Interface Tabs
 tab_entry, tab_timer, tab_results = st.tabs([
     "📋 Registration & Bibs", 
     "⏱️ Timer Reconciliation", 
@@ -35,7 +32,7 @@ with tab_entry:
     
     with col_late:
         st.header("1. On-The-Day Entry")
-        st.info("Record new registrations and assign bibs. These append to your Google Sheet.")
+        st.info("Record new registrations. These append to your 'LateEntries' sheet.")
         with st.form("otd_form", clear_on_submit=True):
             f_name = st.text_input("Forename")
             s_name = st.text_input("Surname")
@@ -48,7 +45,7 @@ with tab_entry:
             
             if st.form_submit_button("Submit & Save Late Entry"):
                 if f_name and s_name and bib:
-                    # Determine Ticket Type based on Year Group
+                    # Auto-assign Ticket Category
                     tkt = "Senior / Adult Race" if yr == "Adult" or yr in ["Year 10", "Year 11", "Year 12", "Year 13"] else "Pre-school to Year 9"
                     
                     new_entry = pd.DataFrame([{
@@ -57,48 +54,114 @@ with tab_entry:
                         "School name": school, "Race Number": bib, "Ticket": tkt
                     }])
                     
-                    # Bypass cache (ttl=0) to ensure we don't overwrite previous late entries
+                    # Fetch live to avoid overwriting cache
                     existing = load_gsheet("LateEntries", ttl_val=0)
                     updated = pd.concat([existing, new_entry], ignore_index=True)
-                    
                     conn.update(worksheet="LateEntries", data=updated)
-                    st.success(f"Bib {bib} assigned to {f_name} {s_name} (Saved to Cloud)")
+                    st.success(f"Bib {bib} assigned to {f_name} {s_name}")
                 else:
                     st.error("Name and Bib Number are required.")
 
     with col_pre:
-        st.header("2. Pre-Registered Bib Assignment")
-        st.sidebar.header("Upload Registration CSV")
-        csv_file = st.sidebar.file_uploader("Upload CSV", type=['csv'], key="pre_reg_upload")
+        st.header("2. Pre-Reg & Race Pack Generation")
+        csv_file = st.sidebar.file_uploader("Upload Registration CSV", type=['csv'], key="pre_reg_upload")
         
         if csv_file:
             df = pd.read_csv(csv_file).fillna('')
+            # Process Full Name into parts
             name_split = df['Full name'].str.split(' ', n=1, expand=True)
             df['Forename'] = name_split[0].str.strip().str.title()
             df['Surname'] = name_split[1].fillna('').str.strip().str.title()
             
-            # Show only Senior Race for bib assignment
+            # Persistent Memory Lookups
+            school_mem_df = load_gsheet("Schools")
+            team_mem_df = load_gsheet("Teams")
+            school_memory = dict(zip(school_mem_df['Raw Name'], school_mem_df['Cleaned Name']))
+            team_memory = dict(zip(team_mem_df['Raw Name'], team_mem_df['Cleaned Name']))
+
+            # Name Cleaning Editors
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("School Name Mapping")
+                unique_schools = [s for s in df['School name'].unique() if str(s).strip() != '']
+                school_mapped = [school_memory.get(s, s) for s in unique_schools]
+                edited_schools = st.data_editor(pd.DataFrame({"Raw Name": unique_schools, "Cleaned Name": school_mapped}), key="sch_ed")
+            with c2:
+                st.subheader("Team Name Mapping")
+                unique_teams = [t for t in df.get('Team name', pd.Series([])).unique() if str(t).strip() != '']
+                team_mapped = [team_memory.get(t, t) for t in unique_teams]
+                edited_teams = st.data_editor(pd.DataFrame({"Raw Name": unique_teams, "Cleaned Name": team_mapped}), key="tm_ed")
+
+            # Bib Assignment Section
+            st.subheader("3. Bib Assignment (Senior Adult Race)")
             adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
             
-            # Get latest assignments from cloud
             existing_bibs = load_gsheet("BibAllocations", ttl_val=0)
             if not existing_bibs.empty:
                 pre_reg_adults = pre_reg_adults.merge(existing_bibs[['Forename', 'Surname', 'Race Number']], on=['Forename', 'Surname'], how='left')
             else:
                 pre_reg_adults['Race Number'] = ""
             
-            st.write("Assign numbers to pre-registered runners below:")
-            edited_bibs = st.data_editor(
-                pre_reg_adults.sort_values('Surname'),
-                hide_index=True, use_container_width=True,
-                column_config={"Race Number": st.column_config.TextColumn("Bib Number")}
-            )
-            
-            if st.button("Save Pre-Reg Bibs to Cloud"):
-                # Saving the whole table replaces the worksheet, which is fine for pre-reg
+            edited_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
+
+            # Central Processing Button
+            if st.button("Process Race Entries & Generate Pack"):
+                # 1. Update Cloud Memory
+                conn.update(worksheet="Schools", data=edited_schools)
+                conn.update(worksheet="Teams", data=edited_teams)
                 conn.update(worksheet="BibAllocations", data=edited_bibs[['Forename', 'Surname', 'Race Number']])
-                st.success("Pre-registered bibs updated in Google Sheets.")
+                
+                # 2. Apply Clean Names
+                school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
+                team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
+                df['Cleaned School Name'] = df['School name'].replace(school_dict)
+                df['Cleaned Team Name'] = df['Team name'].replace(team_dict) if 'Team name' in df.columns else ''
+
+                # 3. Build Excel File
+                output = io.BytesIO()
+                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 10': 10}
+                
+                with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                    # Styling helpers
+                    header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
+                    alt_fill = PatternFill(start_color="EAF1FB", end_color="EAF1FB", fill_type="solid")
+                    header_font = Font(bold=True, color="FFFFFF")
+                    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
+                    def apply_style(ws, col_count):
+                        for cell in ws[2]:
+                            cell.fill, cell.font, cell.border = header_fill, header_font, border
+                        for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
+                            for cell in row:
+                                cell.border = border
+                                if i % 2 == 0: cell.fill = alt_fill
+                        for col in ws.columns:
+                            ws.column_dimensions[col[0].column_letter].width = 20
+
+                    # Generate Individual Tabs
+                    is_kids_tkt = (df['Ticket'] == 'Pre-school to Year 9')
+                    adult_mask_final = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+                    
+                    # Senior Race
+                    res_adult = df[adult_mask_final].copy().sort_values('Surname')
+                    res_adult.insert(0, 'Assigned Bib', '') # Placeholder for manual sheet
+                    cols = ['Assigned Bib', 'Surname', 'Forename', 'Gender', 'Cleaned Team Name', 'School name', 'School year']
+                    res_adult[cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
+                    apply_style(writer.sheets['Senior Adult Race'], len(cols))
+
+                    # Kids Year Groups
+                    kids_df = df[is_kids_tkt & ~df.index.isin(res_adult.index)].copy()
+                    years = sorted([y for y in kids_df['School year'].unique() if y != ''], key=lambda x: YEAR_ORDER.get(x, 99))
+                    for y in years:
+                        y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
+                        y_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Cleaned School Name']
+                        y_df[y_cols].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
+                        apply_style(writer.sheets[str(y)[:31]], len(y_cols))
+
+                st.success("Tring Race Pack Ready!")
+                st.download_button("📥 Download Race Pack (Excel)", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
+                st.session_state['processed_reg'] = df
 
 # --- TAB 2: TIMER RECONCILIATION ---
 with tab_timer:
@@ -147,31 +210,25 @@ with tab_results:
         st.subheader("1. Bib Reconciliation")
         st.dataframe(master_scrut.style.apply(lambda r: ['background-color: #ffcccc' if r['Consensus Bib'] == "CONFLICT" else '' for _ in r], axis=1), use_container_width=True)
 
-        if st.button("Generate Senior Results"):
+        if st.button("Generate Formatted Senior Results"):
             if 'master_timer' in st.session_state:
-                # Build Master Runner List from Pre-reg and Late Entries
+                # Build Master Lookup
                 late_entries = load_gsheet("LateEntries", ttl_val=0)
                 pre_reg_assigned = load_gsheet("BibAllocations", ttl_val=0)
-                
-                # We need the full profiles (Ticket/Team) for pre-reg results
-                # In this step, we'll combine all available sources
                 master_runners = pd.concat([late_entries, pre_reg_assigned], ignore_index=True)
                 master_runners['Race Number'] = master_runners['Race Number'].astype(str).str.strip()
 
-                # Marriage Logic
+                # Merge Timer + Scrutineer
                 final_base = pd.merge(st.session_state['master_timer'][['Consensus Time']], master_scrut[['Consensus Bib']], left_index=True, right_index=True, how='left')
                 final_base['Consensus Bib'] = final_base['Consensus Bib'].astype(str).str.strip()
                 
+                # Merge with Runner Profiles
                 results_complete = final_base.merge(master_runners, left_on='Consensus Bib', right_on='Race Number', how='left')
                 
-                # Filtering for Senior/Adult only for this specific report
+                # Final Formatting for Adult Race
                 res_adult = results_complete[results_complete['Ticket'] == 'Senior / Adult Race'].copy()
                 res_adult.insert(0, 'Position', range(1, len(res_adult) + 1))
                 
-                st.subheader("2. Final Official Standings")
-                st.dataframe(res_adult[['Position', 'Race Number', 'Forename', 'Surname', 'Gender', 'Team name', 'Consensus Time']], use_container_width=True)
-                
-                # Excel Generation matching your 2025 format
                 output_res = io.BytesIO()
                 with pd.ExcelWriter(output_res, engine='openpyxl') as res_writer:
                     final_cols = ['Position', 'Race Number', 'Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Consensus Time']
@@ -180,8 +237,8 @@ with tab_results:
                     ws = res_writer.sheets['Results - Adult Senior Race']
                     ws['A1'] = "Tring Fun Run: Senior Adult Official Results"
                     ws['A1'].font = Font(bold=True, size=14)
-                    # (Standard zebra-striping logic applies here)
 
+                st.success("Results marriage complete.")
                 st.download_button("📥 Download Official Senior Results", output_res.getvalue(), "Tring_Senior_Results.xlsx")
             else:
-                st.error("Please ensure Timers are processed in Tab 2 first.")
+                st.error("Please process Timers in Tab 2 first.")
