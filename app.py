@@ -62,24 +62,20 @@ with tab_entry:
         if csv_file:
             df = pd.read_csv(csv_file).fillna('')
             
-            # 1. Clean up Names immediately
             if 'Full name' in df.columns:
                 name_split = df['Full name'].str.split(' ', n=1, expand=True)
                 df['Forename'] = name_split[0].str.strip().str.title()
                 df['Surname'] = name_split[1].fillna('').str.strip().str.title()
             
-            # 2. Safety Check: Ensure required columns exist for the Excel output
             for col in ['Race Number', 'Gender', 'Team name', 'School name', 'School year']:
                 if col not in df.columns:
                     df[col] = ""
 
-            # 3. Persistent Memory Lookups
             school_mem_df = load_gsheet("Schools")
             team_mem_df = load_gsheet("Teams")
             school_memory = dict(zip(school_mem_df['Raw Name'], school_mem_df['Cleaned Name']))
             team_memory = dict(zip(team_mem_df['Raw Name'], team_mem_df['Cleaned Name']))
 
-            # 4. Name Cleaning Editors
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("School Name Mapping")
@@ -92,7 +88,6 @@ with tab_entry:
                 team_mapped = [team_memory.get(t, t) for t in unique_teams]
                 edited_teams = st.data_editor(pd.DataFrame({"Raw Name": unique_teams, "Cleaned Name": team_mapped}), key="tm_ed", hide_index=True)
 
-            # 5. Bib Assignment Section (Senior Race)
             st.subheader("3. Bib Assignment (Senior Adult Race)")
             adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
@@ -106,18 +101,18 @@ with tab_entry:
             edited_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
 
             if st.button("Process Race Entries & Generate Pack"):
-                # Save Mappings & Bibs to Cloud
                 conn.update(worksheet="Schools", data=edited_schools)
                 conn.update(worksheet="Teams", data=edited_teams)
                 conn.update(worksheet="BibAllocations", data=edited_bibs[['Forename', 'Surname', 'Race Number']])
                 
-                # Apply Cleaning
+                # Apply Cleaning but keep original column names for the final export
                 school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
                 team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
-                df['Cleaned School Name'] = df['School name'].replace(school_dict)
-                df['Cleaned Team Name'] = df['Team name'].replace(team_dict)
+                
+                df_export = df.copy()
+                df_export['School name'] = df_export['School name'].replace(school_dict)
+                df_export['Team name'] = df_export['Team name'].replace(team_dict)
 
-                # BUILD EXCEL
                 output = io.BytesIO()
                 YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 10': 10}
                 
@@ -137,18 +132,18 @@ with tab_entry:
                         for col in ws.columns:
                             ws.column_dimensions[col[0].column_letter].width = 22
 
-                    # Senior Race Tab
-                    res_adult = df[adult_mask].copy().sort_values('Surname')
-                    s_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Cleaned Team Name', 'School name', 'School year']
+                    # Senior Race Tab (Headers cleaned of "Cleaned")
+                    res_adult = df_export[adult_mask].copy().sort_values('Surname')
+                    s_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Team name', 'School name', 'School year']
                     res_adult[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
                     apply_style(writer.sheets['Senior Adult Race'], len(s_cols))
 
-                    # Kids Tabs
-                    kids_df = df[(df['Ticket'] == 'Pre-school to Year 9') & ~df.index.isin(res_adult.index)].copy()
+                    # Kids Tabs (Headers cleaned of "Cleaned")
+                    kids_df = df_export[(df_export['Ticket'] == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult.index)].copy()
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
                     for y in years:
                         y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
-                        k_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Cleaned School Name']
+                        k_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'School name']
                         y_df[k_cols].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
                         apply_style(writer.sheets[str(y)[:31]], len(k_cols))
 
