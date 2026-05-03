@@ -16,13 +16,14 @@ def load_gsheet(worksheet_name, ttl_val=None):
     try:
         return conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
     except:
-        return pd.DataFrame(columns=["Raw Name", "Cleaned Name"])
+        return pd.DataFrame(columns=["Raw Name", "Cleaned Name", "Race Number"])
 
 # 3. Interface Tabs
-tab_entry, tab_timer, tab_results = st.tabs([
+tab_entry, tab_timer, tab_results, tab_stats = st.tabs([
     "📋 Registration & Bibs", 
     "⏱️ Timer Reconciliation", 
-    "🏁 Final Results Marriage"
+    "🏁 Final Results Marriage",
+    "📊 Participation Stats"
 ])
 
 # --- TAB 1: REGISTRATION & BIB ALLOCATION ---
@@ -46,8 +47,8 @@ with tab_entry:
                     tkt = "Senior / Adult Race" if yr == "Adult" or yr in ["Year 10", "Year 11", "Year 12", "Year 13"] else "Pre-school to Year 9"
                     new_entry = pd.DataFrame([{
                         "Forename": f_name.title(), "Surname": s_name.title(),
-                        "Gender": gender, "School year": yr, "Team name": team,
-                        "School name": school, "Race Number": bib, "Ticket": tkt
+                        "Gender": gender, "School year": yr, "Team name": team.title(),
+                        "School name": school.title(), "Race Number": bib, "Ticket": tkt
                     }])
                     existing = load_gsheet("LateEntries", ttl_val=0)
                     updated = pd.concat([existing, new_entry], ignore_index=True)
@@ -65,54 +66,55 @@ with tab_entry:
                 df['Forename'] = name_split[0].str.strip().str.title()
                 df['Surname'] = name_split[1].fillna('').str.strip().str.title()
 
-            # --- REINFORCED MEMORY LOGIC ---
-            # 1. Load ALL historical mappings from Cloud
+            # Ensure essential columns exist for logic
+            for col in ['Race Number', 'Gender', 'Team name', 'School name', 'School year', 'Ticket']:
+                if col not in df.columns: df[col] = ""
+
+            # Memory Logic
             full_school_mem = load_gsheet("Schools", ttl_val=0)
             full_team_mem = load_gsheet("Teams", ttl_val=0)
 
-            # 2. Get unique names from the NEW uploaded CSV
             new_schools = [s for s in df['School name'].unique() if str(s).strip() != '']
-            new_teams = [t for t in df.get('Team name', pd.Series([])).unique() if str(t).strip() != '']
+            new_teams = [t for t in df['Team name'].unique() if str(t).strip() != '']
 
-            # 3. Merge: Find names in the CSV that are NOT in our history yet
             schools_to_add = [s for s in new_schools if s not in full_school_mem['Raw Name'].values]
             teams_to_add = [t for t in new_teams if t not in full_team_mem['Raw Name'].values]
 
-            # 4. Create display DataFrames (History + New discoveries)
             if schools_to_add:
-                new_sch_df = pd.DataFrame({"Raw Name": schools_to_add, "Cleaned Name": schools_to_add})
-                full_school_mem = pd.concat([full_school_mem, new_sch_df], ignore_index=True)
-            
+                full_school_mem = pd.concat([full_school_mem, pd.DataFrame({"Raw Name": schools_to_add, "Cleaned Name": schools_to_add})], ignore_index=True)
             if teams_to_add:
-                new_tm_df = pd.DataFrame({"Raw Name": teams_to_add, "Cleaned Name": teams_to_add})
-                full_team_mem = pd.concat([full_team_mem, new_tm_df], ignore_index=True)
+                full_team_mem = pd.concat([full_team_mem, pd.DataFrame({"Raw Name": teams_to_add, "Cleaned Name": teams_to_add})], ignore_index=True)
 
             c1, c2 = st.columns(2)
             with c1:
-                st.subheader("School Name Mapping")
-                edited_schools = st.data_editor(full_school_mem.sort_values("Raw Name"), key="sch_ed", hide_index=True, use_container_width=True)
+                st.subheader("School Mapping")
+                edited_schools = st.data_editor(full_school_mem.sort_values("Raw Name"), key="sch_ed", hide_index=True)
             with c2:
-                st.subheader("Team Name Mapping")
-                edited_teams = st.data_editor(full_team_mem.sort_values("Raw Name"), key="tm_ed", hide_index=True, use_container_width=True)
+                st.subheader("Team Mapping")
+                edited_teams = st.data_editor(full_team_mem.sort_values("Raw Name"), key="tm_ed", hide_index=True)
 
             st.divider()
             st.subheader("3. Bib Assignment (Senior Adult Race)")
+            # Standardize filter for Ticket strings
+            df['Ticket'] = df['Ticket'].str.strip()
             adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
+            
             existing_bibs = load_gsheet("BibAllocations", ttl_val=0)
             if not existing_bibs.empty:
                 pre_reg_adults = pre_reg_adults.merge(existing_bibs[['Forename', 'Surname', 'Race Number']], on=['Forename', 'Surname'], how='left')
             else:
                 pre_reg_adults['Race Number'] = ""
+            
             edited_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
 
             if st.button("Process Race Entries & Generate Pack"):
-                # Save the FULL edited historical lists back to Cloud
+                # Save to Cloud
                 conn.update(worksheet="Schools", data=edited_schools)
                 conn.update(worksheet="Teams", data=edited_teams)
                 conn.update(worksheet="BibAllocations", data=edited_bibs[['Forename', 'Surname', 'Race Number']])
                 
-                # Apply current cleaning to the export
+                # Apply Cleaning for Export
                 school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
                 team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
                 
@@ -121,7 +123,7 @@ with tab_entry:
                 df_export['Team name'] = df_export['Team name'].replace(team_dict)
 
                 output = io.BytesIO()
-                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 4': 4, 'Year 5': 5, 'Year 6': 6, 'Year 7': 7, 'Year 8': 8, 'Year 9': 9, 'Year 10': 10}
+                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 10': 10}
                 
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
@@ -139,24 +141,34 @@ with tab_entry:
                         for col in ws.columns:
                             ws.column_dimensions[col[0].column_letter].width = 22
 
-                    res_adult = df_export[adult_mask].copy().sort_values('Surname')
+                    # 1. Senior Race Tab
+                    res_adult_final = df_export[adult_mask].copy().sort_values('Surname')
                     s_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Team name', 'School name', 'School year']
-                    res_adult[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
-                    apply_style(writer.sheets['Senior Adult Race'], len(s_cols))
+                    if not res_adult_final.empty:
+                        res_adult_final[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
+                        apply_style(writer.sheets['Senior Adult Race'], len(s_cols))
+                    else:
+                        # Ensure file isn't empty
+                        pd.DataFrame(columns=s_cols).to_excel(writer, sheet_name='Senior Adult Race', index=False)
 
-                    kids_df = df_export[(df_export['Ticket'] == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult.index)].copy()
+                    # 2. Kids Year Tabs
+                    kids_mask = (df_export['Ticket'] == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
+                    kids_df = df_export[kids_mask].copy()
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
+                    
                     for y in years:
                         y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
                         k_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'School name']
-                        y_df[k_cols].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
-                        apply_style(writer.sheets[str(y)[:31]], len(k_cols))
+                        sheet_name = str(y)[:31]
+                        y_df[k_cols].to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                        apply_style(writer.sheets[sheet_name], len(k_cols))
 
-                st.success("Tring Race Pack 2026 Created!")
-                st.download_button("📥 Download Race Pack (Excel)", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
+                st.success("Tring Race Pack Created!")
+                st.download_button("📥 Download Race Pack", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
+                st.session_state['processed_reg'] = df_export
 
-# (Tabs 2 and 3 remain identical to previous integrated version)
-# ... [Timer & Results logic here] ...
+# --- TAB 2, 3, & 4 REMAIN AS BEFORE ---
+# [Logic for Timer, Marriage, and Stats goes here]
 
 # --- TAB 2: TIMER RECONCILIATION ---
 with tab_timer:
