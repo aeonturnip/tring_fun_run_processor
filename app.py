@@ -13,10 +13,12 @@ st.title("🏃‍♂️ Tring Fun Run: 2026 Registration & Results")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_gsheet(worksheet_name, ttl_val=None):
+    """Bypasses cache if ttl_val=0 to ensure we see the latest entries."""
     try:
         return conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
     except:
-        return pd.DataFrame(columns=["Raw Name", "Cleaned Name", "Race Number"])
+        # Return empty DF with common columns if sheet is missing
+        return pd.DataFrame(columns=["Forename", "Surname", "School name", "Team name", "School year", "Race Number", "Ticket"])
 
 # 3. Interface Tabs
 tab_entry, tab_timer, tab_results, tab_stats = st.tabs([
@@ -66,11 +68,11 @@ with tab_entry:
                 df['Forename'] = name_split[0].str.strip().str.title()
                 df['Surname'] = name_split[1].fillna('').str.strip().str.title()
 
-            # Ensure essential columns exist for logic
+            # Ensure essential columns
             for col in ['Race Number', 'Gender', 'Team name', 'School name', 'School year', 'Ticket']:
                 if col not in df.columns: df[col] = ""
 
-            # Memory Logic
+            # Memory Logic (Append & Merge)
             full_school_mem = load_gsheet("Schools", ttl_val=0)
             full_team_mem = load_gsheet("Teams", ttl_val=0)
 
@@ -95,9 +97,7 @@ with tab_entry:
 
             st.divider()
             st.subheader("3. Bib Assignment (Senior Adult Race)")
-            # Standardize filter for Ticket strings
-            df['Ticket'] = df['Ticket'].str.strip()
-            adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            adult_mask = (df['Ticket'].str.strip() == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
             
             existing_bibs = load_gsheet("BibAllocations", ttl_val=0)
@@ -109,12 +109,10 @@ with tab_entry:
             edited_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
 
             if st.button("Process Race Entries & Generate Pack"):
-                # Save to Cloud
                 conn.update(worksheet="Schools", data=edited_schools)
                 conn.update(worksheet="Teams", data=edited_teams)
                 conn.update(worksheet="BibAllocations", data=edited_bibs[['Forename', 'Surname', 'Race Number']])
                 
-                # Apply Cleaning for Export
                 school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
                 team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
                 
@@ -123,7 +121,7 @@ with tab_entry:
                 df_export['Team name'] = df_export['Team name'].replace(team_dict)
 
                 output = io.BytesIO()
-                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 10': 10}
+                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 6': 6, 'Year 7': 7, 'Year 8': 8, 'Year 9': 9, 'Year 10': 10}
                 
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
@@ -141,34 +139,29 @@ with tab_entry:
                         for col in ws.columns:
                             ws.column_dimensions[col[0].column_letter].width = 22
 
-                    # 1. Senior Race Tab
+                    # Senior Race
                     res_adult_final = df_export[adult_mask].copy().sort_values('Surname')
                     s_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Team name', 'School name', 'School year']
                     if not res_adult_final.empty:
                         res_adult_final[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
                         apply_style(writer.sheets['Senior Adult Race'], len(s_cols))
                     else:
-                        # Ensure file isn't empty
                         pd.DataFrame(columns=s_cols).to_excel(writer, sheet_name='Senior Adult Race', index=False)
 
-                    # 2. Kids Year Tabs
-                    kids_mask = (df_export['Ticket'] == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
+                    # Kids Year Tabs
+                    kids_mask = (df_export['Ticket'].str.strip() == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
                     kids_df = df_export[kids_mask].copy()
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
-                    
                     for y in years:
                         y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
                         k_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'School name']
-                        sheet_name = str(y)[:31]
-                        y_df[k_cols].to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
-                        apply_style(writer.sheets[sheet_name], len(k_cols))
+                        y_df[k_cols].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
+                        apply_style(writer.sheets[str(y)[:31]], len(k_cols))
 
                 st.success("Tring Race Pack Created!")
                 st.download_button("📥 Download Race Pack", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
                 st.session_state['processed_reg'] = df_export
 
-# --- TAB 2, 3, & 4 REMAIN AS BEFORE ---
-# [Logic for Timer, Marriage, and Stats goes here]
 
 # --- TAB 2: TIMER RECONCILIATION ---
 with tab_timer:
@@ -233,3 +226,61 @@ with tab_results:
                     ws['A1'].font = Font(bold=True, size=14)
 
                 st.download_button("📥 Download Official Results", output_res.getvalue(), "Tring_Senior_Results_2026.xlsx")
+                
+# --- TAB 4: PARTICIPATION STATS (THE LIVE LEADERBOARD) ---
+with tab_stats:
+    st.header("📊 Live Participation Leaderboard")
+    
+    # 1. Get ALL data from every source
+    late_df = load_gsheet("LateEntries", ttl_val=0)
+    pre_reg_df = st.session_state.get('processed_reg', pd.DataFrame())
+    
+    # 2. Combine into one master list
+    if not late_df.empty or not pre_reg_df.empty:
+        df_all = pd.concat([late_df, pre_reg_df], ignore_index=True)
+        
+        # Standardize for matching
+        df_all['School year'] = df_all['School year'].astype(str).str.strip().str.title()
+        
+        # Define Tiers
+        infant_yrs = ['Reception', 'Year 1', 'Year 2']
+        junior_yrs = ['Year 3', 'Year 4', 'Year 5', 'Year 6']
+        
+        df_all['Tier'] = 'Other'
+        df_all.loc[df_all['School year'].isin(infant_yrs), 'Tier'] = 'Infants'
+        df_all.loc[df_all['School year'].isin(junior_yrs), 'Tier'] = 'Juniors'
+        
+        col_sch, col_tm = st.columns(2)
+        
+        with col_sch:
+            st.subheader("🏫 School Participation (Tiered)")
+            rolls_df = load_gsheet("SchoolRolls", ttl_val=0)
+            
+            if not rolls_df.empty:
+                # Count current runners by school and tier
+                tier_counts = df_all[df_all['Tier'].isin(['Infants', 'Juniors'])].groupby(['School name', 'Tier']).size().unstack(fill_value=0).reset_index()
+                
+                # Merge with Roll data
+                rolls_df['Infants Roll'] = pd.to_numeric(rolls_df['Infants Roll'], errors='coerce').fillna(0)
+                rolls_df['Juniors Roll'] = pd.to_numeric(rolls_df['Juniors Roll'], errors='coerce').fillna(0)
+                
+                sch_stats = rolls_df.merge(tier_counts, left_on='School Name', right_on='School name', how='left').fillna(0)
+                
+                # Percentages
+                sch_stats['Infant %'] = (sch_stats['Infants'] / sch_stats['Infants Roll'] * 100).round(1).replace([float('inf')], 0).fillna(0)
+                sch_stats['Junior %'] = (sch_stats['Juniors'] / sch_stats['Juniors Roll'] * 100).round(1).replace([float('inf')], 0).fillna(0)
+                
+                disp_sch = sch_stats[['School Name', 'Infants', 'Infants Roll', 'Infant %', 'Juniors', 'Juniors Roll', 'Junior %']]
+                st.dataframe(disp_sch.sort_values('Junior %', ascending=False), use_container_width=True, hide_index=True)
+            else:
+                st.warning("Please ensure the 'SchoolRolls' tab exists in your Google Sheet.")
+
+        with col_tm:
+            st.subheader("🏃‍♂️ Team Entry Totals")
+            team_counts = df_all[df_all['Team name'] != '']['Team name'].value_counts().reset_index()
+            team_counts.columns = ['Team Name', 'Entrants']
+            st.dataframe(team_counts.sort_values('Entrants', ascending=False), hide_index=True, use_container_width=True)
+            if not team_counts.empty:
+                st.bar_chart(team_counts.set_index('Team Name'))
+    else:
+        st.info("No participants found. Stats will appear once you upload a CSV or add a Late Entry.")
