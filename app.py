@@ -14,12 +14,10 @@ st.title("🏃‍♂️ Tring Fun Run: 2026 Registration & Results")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_gsheet(worksheet_name, ttl_val=None):
-    """Bypasses cache if ttl_val=0 to ensure we see the latest entries."""
     try:
         return conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
     except:
-        # Return empty DF with common columns if sheet is missing
-        return pd.DataFrame(columns=["Forename", "Surname", "School name", "Team name", "School year", "Race Number", "Ticket"])
+        return pd.DataFrame(columns=["Raw Name", "Cleaned Name", "Race Number"])
 
 # 3. Interface Tabs
 tab_entry, tab_timer, tab_results, tab_stats = st.tabs([
@@ -121,7 +119,12 @@ with tab_entry:
                 df_export['Team name'] = df_export['Team name'].replace(team_dict)
 
                 output = io.BytesIO()
-                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 5': 5, 'Year 6': 6, 'Year 7': 7, 'Year 8': 8, 'Year 9': 9, 'Year 10': 10}
+                # 1. Comprehensive Year Order Dictionary
+                YEAR_ORDER = {
+                    'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4,
+                    'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9,
+                    'Year 9': 10, 'Year 10': 11, 'Year 11': 12, 'Year 12': 13, 'Year 13': 14
+                }
                 
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
@@ -130,17 +133,20 @@ with tab_entry:
                     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
                     def apply_style(ws, col_count, sheet_display_name):
-                        # Row 1: Merged Title
+                        # Row 1: Merged Title (Widened)
                         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=col_count)
                         title_cell = ws.cell(row=1, column=1)
                         title_cell.value = f"Tring Fun Run 2026: {sheet_display_name}"
-                        title_cell.font = Font(bold=True, size=14)
-                        title_cell.alignment = Alignment(horizontal='center')
+                        title_cell.font = Font(bold=True, size=16)
+                        title_cell.alignment = Alignment(horizontal='center', vertical='center')
+                        ws.row_dimensions[1].height = 40 # Increased height for breathing room
 
-                        # Row 2: Headers
+                        # Row 2: Headers (Widened)
+                        ws.row_dimensions[2].height = 25
                         for col_idx in range(1, col_count + 1):
                             cell = ws.cell(row=2, column=col_idx)
                             cell.fill, cell.font, cell.border = header_fill, header_font, border
+                            cell.alignment = Alignment(horizontal='center', vertical='center')
                         
                         # Data Rows
                         for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
@@ -150,7 +156,7 @@ with tab_entry:
                         
                         # Column Widths
                         for col_idx in range(1, col_count + 1):
-                            ws.column_dimensions[get_column_letter(col_idx)].width = 22
+                            ws.column_dimensions[get_column_letter(col_idx)].width = 25
 
                     # Senior Race Tab
                     res_adult_final = df_export[adult_mask].copy().sort_values('Surname')
@@ -158,7 +164,7 @@ with tab_entry:
                     res_adult_final[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
                     apply_style(writer.sheets['Senior Adult Race'], len(s_cols), "Senior Adult Race")
 
-                    # Kids Tabs
+                    # Kids Tabs (Sorted by logical year order)
                     kids_mask = (df_export['Ticket'].str.strip() == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
                     kids_df = df_export[kids_mask].copy()
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
@@ -173,7 +179,7 @@ with tab_entry:
                 st.download_button("📥 Download Race Pack", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
                 st.session_state['processed_reg'] = df_export
 
-# --- TAB 2 & 3: TIMER & RESULTS ---
+# --- TAB 2, 3, & 4 LOGIC (REMAINS CONSISTENT) ---
 with tab_timer:
     st.header("Timer Results Reconciliation")
     timer_files = st.file_uploader("Upload Timer CSVs", type=['csv'], accept_multiple_files=True)
@@ -231,7 +237,6 @@ with tab_results:
                     ws['A1'].font = Font(bold=True, size=14)
                 st.download_button("📥 Download Results", output_res.getvalue(), "Tring_Senior_Results_2026.xlsx")
 
-# --- TAB 4: PARTICIPATION STATS ---
 with tab_stats:
     st.header("📊 Live Participation Leaderboard")
     late_df = load_gsheet("LateEntries", ttl_val=0)
