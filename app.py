@@ -68,11 +68,10 @@ with tab_entry:
                 df['Forename'] = name_split[0].str.strip().str.title()
                 df['Surname'] = name_split[1].fillna('').str.strip().str.title()
 
-            # Ensure essential columns
             for col in ['Race Number', 'Gender', 'Team name', 'School name', 'School year', 'Ticket']:
                 if col not in df.columns: df[col] = ""
 
-            # Memory Logic (Append & Merge)
+            # Memory Logic
             full_school_mem = load_gsheet("Schools", ttl_val=0)
             full_team_mem = load_gsheet("Teams", ttl_val=0)
 
@@ -97,7 +96,8 @@ with tab_entry:
 
             st.divider()
             st.subheader("3. Bib Assignment (Senior Adult Race)")
-            adult_mask = (df['Ticket'].str.strip() == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            df['Ticket'] = df['Ticket'].str.strip()
+            adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
             
             existing_bibs = load_gsheet("BibAllocations", ttl_val=0)
@@ -121,7 +121,7 @@ with tab_entry:
                 df_export['Team name'] = df_export['Team name'].replace(team_dict)
 
                 output = io.BytesIO()
-                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 6': 6, 'Year 7': 7, 'Year 8': 8, 'Year 9': 9, 'Year 10': 10}
+                YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 3': 3, 'Year 4': 4, 'Year 5': 5, 'Year 6': 6, 'Year 7': 7, 'Year 8': 8, 'Year 9': 9, 'Year 10': 10}
                 
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
                     header_fill = PatternFill(start_color="333333", end_color="333333", fill_type="solid")
@@ -129,34 +129,44 @@ with tab_entry:
                     header_font = Font(bold=True, color="FFFFFF")
                     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-                    def apply_style(ws, col_count):
+                    def apply_style(ws, col_count, sheet_display_name):
+                        # Merge Row 1 for the Tab Name Header
+                        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=col_count)
+                        title_cell = ws.cell(row=1, column=1)
+                        title_cell.value = f"Tring Fun Run 2026: {sheet_display_name}"
+                        title_cell.font = Font(bold=True, size=14)
+                        title_cell.alignment = Alignment(horizontal='center')
+
+                        # Style the Data Headers (Now on Row 2)
                         for cell in ws[2]:
                             cell.fill, cell.font, cell.border = header_fill, header_font, border
+                        
+                        # Style the Data Rows (Starting Row 3)
                         for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
                             for cell in row:
                                 cell.border = border
                                 if i % 2 == 0: cell.fill = alt_fill
+                        
                         for col in ws.columns:
                             ws.column_dimensions[col[0].column_letter].width = 22
 
-                    # Senior Race
+                    # 1. Senior Race Tab
                     res_adult_final = df_export[adult_mask].copy().sort_values('Surname')
                     s_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'Team name', 'School name', 'School year']
-                    if not res_adult_final.empty:
-                        res_adult_final[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
-                        apply_style(writer.sheets['Senior Adult Race'], len(s_cols))
-                    else:
-                        pd.DataFrame(columns=s_cols).to_excel(writer, sheet_name='Senior Adult Race', index=False)
+                    # Start headers on row 2 (startrow=1)
+                    res_adult_final[s_cols].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
+                    apply_style(writer.sheets['Senior Adult Race'], len(s_cols), "Senior Adult Race")
 
-                    # Kids Year Tabs
+                    # 2. Kids Year Tabs
                     kids_mask = (df_export['Ticket'].str.strip() == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
                     kids_df = df_export[kids_mask].copy()
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
                     for y in years:
                         y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
                         k_cols = ['Race Number', 'Surname', 'Forename', 'Gender', 'School name']
-                        y_df[k_cols].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
-                        apply_style(writer.sheets[str(y)[:31]], len(k_cols))
+                        sheet_name = str(y)[:31]
+                        y_df[k_cols].to_excel(writer, sheet_name=sheet_name, index=False, startrow=1)
+                        apply_style(writer.sheets[sheet_name], len(k_cols), y)
 
                 st.success("Tring Race Pack Created!")
                 st.download_button("📥 Download Race Pack", output.getvalue(), "Tring_Race_Pack_2026.xlsx")
