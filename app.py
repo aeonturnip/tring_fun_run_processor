@@ -118,15 +118,25 @@ with tab_entry:
             ed_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
 
             if st.button("Process & Generate Pack"):
+                # 1. Update Cloud
                 conn.update(worksheet="Schools", data=ed_sch)
                 conn.update(worksheet="Teams", data=ed_tm)
                 conn.update(worksheet="BibAllocations", data=ed_bibs)
                 
+                # 2. FIX: Merge the bibs from the editor back into the local dataframe
                 sch_dict = dict(zip(ed_sch["Raw Name"], ed_sch["Cleaned Name"]))
                 tm_dict = dict(zip(ed_tm["Raw Name"], ed_tm["Cleaned Name"]))
+                
                 df_export = df.copy()
                 df_export['School name'] = df_export['School name'].replace(sch_dict)
                 df_export['Team name'] = df_export['Team name'].replace(tm_dict)
+                
+                # Drop existing Race Number if it came from CSV to avoid overlap
+                if 'Race Number' in df_export.columns:
+                    df_export = df_export.drop(columns=['Race Number'])
+                
+                # Weave the assigned bibs into the final list
+                df_export = df_export.merge(ed_bibs[['Forename', 'Surname', 'Race Number']], on=['Forename', 'Surname'], how='left').fillna('')
 
                 output = io.BytesIO()
                 YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 9': 10, 'Year 10': 11}
@@ -186,7 +196,7 @@ with tab_entry:
                 st.session_state['processed_reg'] = df_export
                 st.cache_data.clear()
 
-# --- TAB 2: TIMER ---
+# --- TAB 2, 3, & 4 LOGIC ---
 with tab_timer:
     st.header("Timer Reconciliation")
     t_files = st.file_uploader("Upload Timer CSVs", type=['csv'], accept_multiple_files=True, key="timer_u")
@@ -208,7 +218,6 @@ with tab_timer:
         st.dataframe(master_t.style.apply(lambda r: ['background-color: #ffcccc' if r['Variance (Sec)'] > 1 else '' for _ in r], axis=1), use_container_width=True)
         st.session_state['master_timer'] = master_t
 
-# --- TAB 3: RESULTS ---
 with tab_results:
     st.header("Results Marriage")
     s_files = st.file_uploader("Upload Scrutineer CSVs", type=['csv'], accept_multiple_files=True, key="scrut_u")
@@ -242,7 +251,6 @@ with tab_results:
             else:
                 st.warning("No Senior runners matched.")
 
-# --- TAB 4: STATS ---
 with tab_stats:
     st.header("📊 Stats")
     pr = st.session_state.get('processed_reg', pd.DataFrame())
