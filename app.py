@@ -14,10 +14,26 @@ st.title("🏃‍♂️ Tring Fun Run: 2026 Registration & Results")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_gsheet(worksheet_name, ttl_val=None):
+    """
+    Safely loads a Google Sheet tab. If the tab is missing or empty, 
+    it returns a DataFrame with the correct headers for that specific tab.
+    """
     try:
-        return conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
+        df = conn.read(worksheet=worksheet_name, ttl=ttl_val).fillna('')
+        # If the sheet exists but has no columns/data, force the correct headers
+        if df.empty:
+            raise ValueError("Empty Sheet")
+        return df
     except:
-        return pd.DataFrame(columns=["Forename", "Surname", "Gender", "School name", "Team name", "School year", "Race Number", "Ticket"])
+        # Define correct headers for each specific worksheet
+        if worksheet_name in ["Schools", "Teams"]:
+            return pd.DataFrame(columns=["Raw Name", "Cleaned Name"])
+        elif worksheet_name == "SchoolRolls":
+            return pd.DataFrame(columns=["School Name", "Infants Roll", "Juniors Roll"])
+        elif worksheet_name == "BibAllocations":
+             return pd.DataFrame(columns=["Forename", "Surname", "Gender", "Team name", "School year", "Race Number", "Ticket"])
+        else:
+            return pd.DataFrame(columns=["Forename", "Surname", "Gender", "School name", "Team name", "School year", "Race Number", "Ticket"])
 
 # 3. Interface Tabs
 tab_entry, tab_timer, tab_results, tab_stats = st.tabs([
@@ -70,10 +86,13 @@ with tab_entry:
             for col in ['Race Number', 'Gender', 'Team name', 'School name', 'School year', 'Ticket']:
                 if col not in df.columns: df[col] = ""
 
+            # Memory Logic
             full_school_mem = load_gsheet("Schools", ttl_val=0)
             full_team_mem = load_gsheet("Teams", ttl_val=0)
+
             new_schools = [s for s in df['School name'].unique() if str(s).strip() != '']
             new_teams = [t for t in df['Team name'].unique() if str(t).strip() != '']
+
             schools_to_add = [s for s in new_schools if s not in full_school_mem['Raw Name'].values]
             teams_to_add = [t for t in new_teams if t not in full_team_mem['Raw Name'].values]
 
@@ -94,11 +113,11 @@ with tab_entry:
             st.subheader("3. Bib Assignment (Senior Adult Race)")
             df['Ticket'] = df['Ticket'].str.strip()
             adult_mask = (df['Ticket'] == 'Senior / Adult Race') | (df['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
-            
-            # Prepare pre-reg list with ALL necessary columns for the final results marriage
             pre_reg_adults = df[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
+            
             existing_bibs = load_gsheet("BibAllocations", ttl_val=0)
             if not existing_bibs.empty:
+                # Merge and preserve Ticket/Gender/Team info
                 pre_reg_adults = pre_reg_adults.merge(existing_bibs[['Forename', 'Surname', 'Race Number']], on=['Forename', 'Surname'], how='left')
             else:
                 pre_reg_adults['Race Number'] = ""
@@ -106,13 +125,14 @@ with tab_entry:
             edited_bibs = st.data_editor(pre_reg_adults.sort_values('Surname'), key="bib_ed", hide_index=True)
 
             if st.button("Process Race Entries & Generate Pack"):
-                # FIX: Save all columns to BibAllocations so the results tab has access to Gender/Team/Ticket
                 conn.update(worksheet="Schools", data=edited_schools)
                 conn.update(worksheet="Teams", data=edited_teams)
+                # Store full runner details so Results tab can find Ticket type
                 conn.update(worksheet="BibAllocations", data=edited_bibs)
                 
                 school_dict = dict(zip(edited_schools["Raw Name"], edited_schools["Cleaned Name"]))
                 team_dict = dict(zip(edited_teams["Raw Name"], edited_teams["Cleaned Name"]))
+                
                 df_export = df.copy()
                 df_export['School name'] = df_export['School name'].replace(school_dict)
                 df_export['Team name'] = df_export['Team name'].replace(team_dict)
@@ -128,18 +148,23 @@ with tab_entry:
 
                     def apply_style(ws, col_count, sheet_display_name):
                         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=col_count)
-                        title_cell = ws.cell(row=1, column=1); title_cell.value = f"Tring Fun Run 2026: {sheet_display_name}"
-                        title_cell.font = Font(bold=True, size=16); title_cell.alignment = Alignment(horizontal='center', vertical='center')
+                        title_cell = ws.cell(row=1, column=1)
+                        title_cell.value = f"Tring Fun Run 2026: {sheet_display_name}"
+                        title_cell.font = Font(bold=True, size=16)
+                        title_cell.alignment = Alignment(horizontal='center', vertical='center')
                         ws.row_dimensions[1].height = 45
+
                         ws.row_dimensions[2].height = 25
                         for col_idx in range(1, col_count + 1):
-                            cell = ws.cell(row=2, column=col_idx); cell.fill, cell.font, cell.border = header_fill, header_font, border
+                            cell = ws.cell(row=2, column=col_idx)
+                            cell.fill, cell.font, cell.border = header_fill, header_font, border
                             cell.alignment = Alignment(horizontal='center', vertical='center')
                             header_text = str(cell.value)
                             if "School" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 45
                             elif "Team" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 35
                             elif "Forename" in header_text or "Surname" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 25
                             else: ws.column_dimensions[get_column_letter(col_idx)].width = 18
+                        
                         for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
                             for cell in row:
                                 cell.border = border
@@ -177,9 +202,11 @@ with tab_timer:
             t_df = t_df[[0, 2]].rename(columns={0: 'Position', 2: t_file.name}).set_index('Position')
             all_timers.append(t_df)
         master_timer = pd.concat(all_timers, axis=1)
+        
         def to_sec(t):
             if pd.isna(t): return None
             parts = str(t).split(':'); return int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])
+        
         sec_df = master_timer.map(to_sec)
         master_timer['Consensus Time'] = sec_df.median(axis=1).apply(lambda x: str(datetime.timedelta(seconds=int(x))).zfill(8) if pd.notna(x) else "")
         master_timer['Variance (Sec)'] = sec_df.max(axis=1) - sec_df.min(axis=1)
@@ -201,24 +228,23 @@ with tab_results:
         st.dataframe(master_scrut.style.apply(lambda r: ['background-color: #ffcccc' if r['Consensus Bib'] == "CONFLICT" else '' for _ in r], axis=1), use_container_width=True)
 
         if 'master_timer' in st.session_state:
-            # 1. Load Registration Data from Cloud
+            # Refresh data from cloud
             late_entries = load_gsheet("LateEntries", ttl_val=0)
             pre_reg_assigned = load_gsheet("BibAllocations", ttl_val=0)
             master_runners = pd.concat([late_entries, pre_reg_assigned], ignore_index=True)
             master_runners['Race Number'] = master_runners['Race Number'].astype(str).str.strip()
 
-            # 2. Merge Timers + Scrutineers + Runners
+            # Marriage
             final_base = pd.merge(st.session_state['master_timer'][['Consensus Time']], master_scrut[['Consensus Bib']], left_index=True, right_index=True, how='left')
             results_complete = final_base.merge(master_runners, left_on='Consensus Bib', right_on='Race Number', how='left')
             
-            # 3. Filter for Seniors
+            # Senior Filter
             res_adult = results_complete[results_complete['Ticket'] == 'Senior / Adult Race'].copy()
             res_adult.insert(0, 'Position', range(1, len(res_adult) + 1))
             
-            # 4. Show Preview so you can see if names matched
             st.subheader("Live Results Preview (Seniors Only)")
             if not res_adult.empty:
-                st.dataframe(res_adult[['Position', 'Race Number', 'Forename', 'Surname', 'Consensus Time']], use_container_width=True)
+                st.dataframe(res_adult[['Position', 'Race Number', 'Forename', 'Surname', 'Consensus Time']], use_container_width=True, hide_index=True)
                 
                 if st.button("Generate Senior Results Excel"):
                     output_res = io.BytesIO()
@@ -229,7 +255,7 @@ with tab_results:
                         ws['A1'] = "Tring Fun Run 2026: Official Senior Results"; ws['A1'].font = Font(bold=True, size=14)
                     st.download_button("📥 Download Official Results", output_res.getvalue(), "Tring_Senior_Results_2026.xlsx")
             else:
-                st.warning("No Senior runners matched. Check that Bibs in Scrutineer files exist in 'BibAllocations' or 'LateEntries' with the correct Ticket type.")
+                st.warning("No matched Senior runners found. Ensure bibs in scrutineer files are recorded in Tab 1 under the Senior / Adult ticket.")
 
 # --- TAB 4: PARTICIPATION STATS ---
 with tab_stats:
@@ -240,6 +266,7 @@ with tab_stats:
         df_all['School year'] = df_all['School year'].astype(str).str.strip().str.title()
         infant_yrs = ['Reception', 'Year 1', 'Year 2']; junior_yrs = ['Year 3', 'Year 4', 'Year 5', 'Year 6']
         df_all['Tier'] = 'Other'; df_all.loc[df_all['School year'].isin(infant_yrs), 'Tier'] = 'Infants'; df_all.loc[df_all['School year'].isin(junior_yrs), 'Tier'] = 'Juniors'
+        
         col_sch, col_tm = st.columns(2)
         with col_sch:
             st.subheader("🏫 School Participation"); rolls_df = load_gsheet("SchoolRolls", ttl_val=0)
@@ -254,6 +281,5 @@ with tab_stats:
             st.subheader("🏃‍♂️ Team Entry Totals"); team_counts = df_all[df_all['Team name'] != '']['Team name'].value_counts().reset_index()
             team_counts.columns = ['Team Name', 'Entrants']
             st.dataframe(team_counts.sort_values('Entrants', ascending=False), hide_index=True, use_container_width=True)
-            if not team_counts.empty: st.bar_chart(team_counts.set_index('Team Name'))
     else:
         st.info("No participants found yet.")
