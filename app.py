@@ -105,7 +105,13 @@ with tab_entry:
             st.divider()
             st.subheader("3. Bib Assignment (Senior Adult Race)")
             df_raw['Ticket'] = df_raw['Ticket'].str.strip()
-            adult_mask = (df_raw['Ticket'] == 'Senior / Adult Race') | (df_raw['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            
+            # --- MASKS ---
+            adult_mask = (df_raw['Ticket'].str.contains('Senior', case=False, na=False)) | (df_raw['School year'].isin(['Year 10', 'Year 11', 'Year 12', 'Year 13']))
+            donation_mask = df_raw['Ticket'].str.contains('Donation', case=False, na=False)
+            # Kids are anything not an Adult and not a Donation
+            kids_mask = (~adult_mask) & (~donation_mask)
+
             pre_reg_adults = df_raw[adult_mask][['Forename', 'Surname', 'Gender', 'Team name', 'School year', 'Ticket']].copy()
             
             bib_allocs = load_gsheet_cached("BibAllocations")
@@ -134,7 +140,6 @@ with tab_entry:
                 YEAR_ORDER = {'Pre-school': 0, 'Reception': 1, 'Year 1': 2, 'Year 2': 3, 'Year 3': 4, 'Year 4': 5, 'Year 5': 6, 'Year 6': 7, 'Year 7': 8, 'Year 8': 9, 'Year 9': 10, 'Year 10': 11}
                 
                 with pd.ExcelWriter(output, engine='openpyxl') as writer:
-                    # [Formatting functions omitted for space, keep exactly as in your current file]
                     def apply_style(ws, col_count, sheet_display_name):
                         ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=col_count)
                         title_cell = ws.cell(row=1, column=1); title_cell.value = f"Tring Fun Run 2026: {sheet_display_name}"
@@ -144,26 +149,20 @@ with tab_entry:
                         for col_idx in range(1, col_count + 1):
                             cell = ws.cell(row=2, column=col_idx); cell.fill, cell.font, cell.border = PatternFill(start_color="333333", end_color="333333", fill_type="solid"), Font(bold=True, color="FFFFFF"), Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
                             cell.alignment = Alignment(horizontal='center', vertical='center')
-                            header_text = str(cell.value)
-                            if "School" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 45
-                            elif "Team" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 35
-                            elif "Forename" in header_text or "Surname" in header_text: ws.column_dimensions[get_column_letter(col_idx)].width = 25
-                            else: ws.column_dimensions[get_column_letter(col_idx)].width = 18
                         for i, row in enumerate(ws.iter_rows(min_row=3, max_row=ws.max_row, max_col=col_count), start=1):
                             for cell in row:
                                 cell.border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
                                 if i % 2 == 0: cell.fill = PatternFill(start_color="EAF1FB", end_color="EAF1FB", fill_type="solid")
                                 cell.alignment = Alignment(vertical='center')
 
-                    # 1. Senior Adult Race
+                    # 1. Seniors
                     res_adult_final = df_export[adult_mask].copy().sort_values('Surname')
                     seniors_written = len(res_adult_final)
                     if not res_adult_final.empty:
                         res_adult_final[['Race Number', 'Surname', 'Forename', 'Gender', 'Team name', 'School name', 'School year']].to_excel(writer, sheet_name='Senior Adult Race', index=False, startrow=1)
                         apply_style(writer.sheets['Senior Adult Race'], 7, "Senior Adult Race")
                     
-                    # 2. Kids Tabs
-                    kids_mask = (df_export['Ticket'].str.strip() == 'Pre-school to Year 9') & ~df_export.index.isin(res_adult_final.index)
+                    # 2. Kids
                     kids_df = df_export[kids_mask].copy()
                     kids_written = len(kids_df)
                     years = sorted([y for y in kids_df['School year'].unique() if str(y).strip() != ''], key=lambda x: YEAR_ORDER.get(x, 99))
@@ -171,21 +170,23 @@ with tab_entry:
                         y_df = kids_df[kids_df['School year'] == y].sort_values('Surname')
                         y_df[['Race Number', 'Surname', 'Forename', 'Gender', 'School name']].to_excel(writer, sheet_name=str(y)[:31], index=False, startrow=1)
                         apply_style(writer.sheets[str(y)[:31]], 5, y)
-                
-                # --- NEW RECONCILIATION SUMMARY ---
-                st.success("✅ Race Pack Processed Successfully!")
+
+                # --- UPDATED RECONCILIATION SUMMARY ---
+                donations_csv = len(df_raw[donation_mask])
+                total_csv = len(df_raw)
                 
                 recon_data = {
-                    "Category": ["Seniors / Adults", "Kids (Pre-school to Yr 9)", "Total Runners"],
-                    "Count in CSV": [len(df_raw[adult_mask]), len(df_raw[kids_mask]), len(df_raw)],
-                    "Count in Excel": [seniors_written, kids_written, seniors_written + kids_written]
+                    "Category": ["Seniors / Adults", "Kids (Pre-school to Yr 9)", "Donations (No Bib)", "Total Runners"],
+                    "Count in CSV": [len(df_raw[adult_mask]), len(df_raw[kids_mask]), donations_csv, total_csv],
+                    "Processed / Accounted": [seniors_written, kids_written, donations_csv, (seniors_written + kids_written + donations_csv)]
                 }
+                
+                st.success("✅ Race Pack Processed Successfully!")
                 st.subheader("🏁 Data Integrity Check")
                 recon_df = pd.DataFrame(recon_data)
                 
-                # Highlight discrepancies
                 def highlight_mismatch(s):
-                    return ['background-color: #ffcccc' if s['Count in CSV'] != s['Count in Excel'] else 'background-color: #ccffcc' for _ in s]
+                    return ['background-color: #ffcccc' if s['Count in CSV'] != s['Processed / Accounted'] else 'background-color: #ccffcc' for _ in s]
                 
                 st.table(recon_df.style.apply(highlight_mismatch, axis=1))
 
